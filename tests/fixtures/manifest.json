@@ -1,0 +1,105 @@
+{
+  "layer": {
+    "name": "terrain",
+    "format": "quantized-mesh-1.0",
+    "scheme": "tms",
+    "projection": "EPSG:4326",
+    "bounds": [
+      -180,
+      -90,
+      180,
+      90
+    ],
+    "minzoom": 0,
+    "tiles": [
+      "{z}/{x}/{y}.terrain?v={version}"
+    ],
+    "version": "1.48133.0",
+    "attribution": "",
+    "description": "",
+    "extensions": [
+      "bvh",
+      "watermask",
+      "metadata",
+      "octvertexnormals"
+    ],
+    "maxzoom": 19,
+    "bvhlevels": 6,
+    "metadataAvailability": 10
+  },
+  "imagery": {
+    "title": "Sentinel-2",
+    "max_zoom": 13
+  },
+  "terrain_keys": [
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      0
+    ],
+    [
+      5,
+      36,
+      20
+    ],
+    [
+      10,
+      1180,
+      654
+    ]
+  ],
+  "imagery_keys": [
+    [
+      5,
+      36,
+      20
+    ],
+    [
+      10,
+      1180,
+      654
+    ]
+  ],
+  "probes": [
+    {
+      "key": [
+        9,
+        590,
+        327
+      ],
+      "predicted_present": true,
+      "status": 200,
+      "ok": true
+    },
+    {
+      "key": [
+        9,
+        64,
+        32
+      ],
+      "predicted_present": false,
+      "status": "error: HTTP 500 for http://tile-server/api/terrain/9/64/32.terrain?v=1.48133.0",
+      "ok": false
+    },
+    {
+      "key": [
+        9,
+        64,
+        96
+      ],
+      "predicted_present": false,
+      "status": "error: HTTP 502 for http://tile-server/api/terrain/9/64/96.terrain?v=1.48133.0",
+      "ok": false
+    }
+  ],
+  "coverage_center": [
+    24.9609375,
+    27.421875
+  ],
+  "max_known_level": 13
+}

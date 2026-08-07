@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+develop-eggs/
+sdist/
+wheels/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Build artifacts (built addon zips)
+dist/
+
+# Render outputs
+renders/
+
+# Blender
+*.blend1
+*.blend2
+*.blend@
+*.blend.orig
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local scratch
+*.log
+tmp/
