@@ -271,6 +271,7 @@ class Streamer:
                 if md.geometric_error is not None:
                     tile.geometric_error = md.geometric_error
                 tile.aabb = (md.aabb_min, md.aabb_max)
+                tile.min_h, tile.max_h = md.min_h, md.max_h
                 self._build_tile(tile, img_path)
                 builds += 1
                 changed = True
@@ -312,13 +313,23 @@ class Streamer:
         return changed
 
     def _build_tile(self, tile, img_path: str | None):
+        from . import map_style
+
         md = tile.mesh_data
-        if img_path is None and md.imagery_key is not None and self.imagery:
-            img_path = self.imagery.cache.imagery_path(*md.imagery_key)
-        if img_path is not None and md.imagery_key is not None:
-            mat = scene_builder.get_or_create_material(md.imagery_key, img_path)
+        relief = (
+            bpy.data.materials.get(map_style.RELIEF_MAT_NAME)
+            if map_style.is_active()
+            else None
+        )
+        if relief is not None:
+            mat = relief
         else:
-            mat = scene_builder.get_or_create_gray_material()
+            if img_path is None and md.imagery_key is not None and self.imagery:
+                img_path = self.imagery.cache.imagery_path(*md.imagery_key)
+            if img_path is not None and md.imagery_key is not None:
+                mat = scene_builder.get_or_create_material(md.imagery_key, img_path)
+            else:
+                mat = scene_builder.get_or_create_gray_material()
         obj = scene_builder.build_tile_object(tile.key, md, mat)
         obj.hide_viewport = True
         obj.hide_render = True

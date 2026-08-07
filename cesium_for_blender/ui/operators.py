@@ -2,8 +2,8 @@ import traceback
 
 import bpy
 
-from ..core import (camera, clouds, provider, quantized_mesh, scene_builder,
-                    streamer, tiling)
+from ..core import (camera, clouds, map_style, provider, quantized_mesh,
+                    scene_builder, streamer, tiling)
 
 
 class CESIUM_OT_connect(bpy.types.Operator):
@@ -223,6 +223,51 @@ class CESIUM_OT_add_clouds(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CESIUM_OT_relief_style(bpy.types.Operator):
+    """Toggle the relief-map terrain style (hypsometric tint + slope rock +
+    studio mist look, after Owen Powell's GIS dioramas). Elevation range is
+    auto-read from the streamed tiles; tweak in the redo panel (F9)"""
+
+    bl_idname = "cesium.relief_style"
+    bl_label = "Relief Map Style"
+    bl_options = {"REGISTER", "UNDO"}
+
+    contour_interval: bpy.props.FloatProperty(
+        name="Contour Interval (m)", default=0.0, min=0.0, max=2000.0,
+        description="Elevation contour lines; 0 disables them",
+    )
+    studio: bpy.props.BoolProperty(
+        name="Studio Backdrop + Mist", default=True,
+        description="Neutral gray world, soft sun, and a composited mist pass"
+        " — the diorama look. Disable to keep the current sky and lighting",
+    )
+
+    def execute(self, context):
+        if map_style.is_active():
+            n = map_style.remove(context)
+            self.report({"INFO"}, f"Relief style off — imagery restored on {n} tiles")
+            return {"FINISHED"}
+        s = streamer.get()
+        heights = [
+            (t.min_h, t.max_h)
+            for t in s.tiles.tiles.values()
+            if t.visible and t.min_h is not None
+        ]
+        if heights:
+            min_e = min(h[0] for h in heights)
+            max_e = max(h[1] for h in heights)
+            if max_e - min_e < 200.0:
+                max_e = min_e + 200.0
+        else:
+            min_e, max_e = 0.0, 4000.0
+        n = map_style.apply(context, min_e, max_e, self.contour_interval, self.studio)
+        self.report(
+            {"INFO"},
+            f"Relief style on {n} tiles, elevation ramp {min_e:.0f}-{max_e:.0f} m",
+        )
+        return {"FINISHED"}
+
+
 class CESIUM_OT_remove_clouds(bpy.types.Operator):
     bl_idname = "cesium.remove_clouds"
     bl_label = "Remove Clouds"
@@ -243,6 +288,7 @@ _CLASSES = (
     CESIUM_OT_load_single_tile,
     CESIUM_OT_add_clouds,
     CESIUM_OT_remove_clouds,
+    CESIUM_OT_relief_style,
 )
 
 

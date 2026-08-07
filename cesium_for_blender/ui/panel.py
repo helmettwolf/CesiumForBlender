@@ -46,10 +46,17 @@ class CESIUM_PT_main(bpy.types.Panel):
         row.operator("cesium.clear", icon="TRASH")
 
         box = layout.box()
-        box.label(text="Atmosphere", icon="WORLD_DATA")
+        box.label(text="Atmosphere & Style", icon="WORLD_DATA")
         row = box.row(align=True)
         row.operator("cesium.add_clouds", icon="OUTLINER_OB_VOLUME")
         row.operator("cesium.remove_clouds", text="", icon="X")
+        from ..core import map_style
+        box.operator(
+            "cesium.relief_style",
+            icon="SHADING_RENDERED",
+            text="Relief Map Style" if not map_style.is_active() else "Back To Satellite",
+            depress=map_style.is_active(),
+        )
 
         box = layout.box()
         box.label(text="Status", icon="INFO")

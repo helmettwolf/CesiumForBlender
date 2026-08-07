@@ -34,6 +34,7 @@ class Tile:
     __slots__ = (
         "key", "state", "visible", "geometric_error", "ge_floor", "aabb",
         "mesh_data", "decoded_at", "last_wanted", "retries", "next_retry",
+        "min_h", "max_h",
     )
 
     def __init__(self, key: tuple):
@@ -48,6 +49,8 @@ class Tile:
         self.last_wanted = 0.0
         self.retries = 0
         self.next_retry = 0.0
+        self.min_h: float | None = None   # geodetic heights from the QM header,
+        self.max_h: float | None = None   # kept for hypsometric styling
 
 
 class TileCache:

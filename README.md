@@ -53,7 +53,20 @@ Blender → Edit → Preferences → Add-ons → Install… → `dist/cesium_for
 Diagnostic: **Load Single Tile** synchronously builds one tile (bypasses the
 streamer) — useful to sanity-check a server.
 
-### Atmosphere → Add Clouds
+### Atmosphere & Style → Relief Map Style
+
+One click swaps the satellite imagery for an Owen Powell-style relief-model
+look ([his BlenderNation writeup](https://www.blendernation.com/2016/09/03/owen-powell-maps-terrain-models/)):
+hypsometric height tint (valley green → buff → rock → pale summits, range
+auto-calibrated from the streamed tiles' quantized-mesh headers),
+slope-driven bare-rock blending, matte clay material, a neutral studio
+backdrop, soft sun, and a composited mist pass for the diorama fade.
+Elevation is curvature-corrected (`z + d²/2R`) so tints stay level far from
+the ENU origin. Optional contour lines via the F9 panel. Click again to
+restore imagery and the previous sky. Streaming continues to work — new
+tiles pick up whichever style is active.
+
+### Atmosphere & Style → Add Clouds
 
 One click drops a procedural volumetric cloud layer over wherever you're
 looking: the base height is found by ray-casting the terrain under the camera,
