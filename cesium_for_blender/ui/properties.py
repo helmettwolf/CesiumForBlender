@@ -34,13 +34,16 @@ class CesiumSettings(bpy.types.PropertyGroup):
         default="http://localhost:8080/api/tiles",
     )
     ion_token: bpy.props.StringProperty(
-        name="ion Token", subtype="PASSWORD",
-        # ion JWTs are ~300 chars; without an explicit maxlen the UI edit
-        # buffer is 128 bytes and pasting silently truncates -> 401s
+        name="ion Token",
+        # plain text on purpose: PASSWORD-subtype fields mask the value AND
+        # clipboard paste into them is unreliable in Blender — tokens
+        # arrived truncated or not at all. ion JWTs are ~300 chars; without
+        # an explicit maxlen the UI edit buffer is 128 bytes.
         maxlen=1024,
         description="Cesium ion access token (cesium.com/ion/tokens)."
-        " Stored in the .blend; leave empty to use the CESIUM_ION_TOKEN"
-        " environment variable instead",
+        " Shown and stored in plain text in the .blend — leave empty and"
+        " set the CESIUM_ION_TOKEN environment variable to keep it out of"
+        " the file",
         default="",
     )
     ion_terrain_asset: bpy.props.IntProperty(
