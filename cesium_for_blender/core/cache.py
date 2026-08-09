@@ -73,13 +73,22 @@ class TileCache:
             counts[t.state.value] = counts.get(t.state.value, 0) + 1
         return counts
 
-    def evictable(self, keep: set, budget: int) -> list[Tile]:
-        """BUILT, hidden, unwanted tiles beyond `budget`, LRU-first."""
+    def evictable(
+        self, keep: set, budget: int, now: float | None = None,
+        grace_s: float = 0.0,
+    ) -> list[Tile]:
+        """BUILT, hidden, unwanted tiles beyond `budget`, LRU-first. Tiles
+        wanted within grace_s are spared — evicting something a small camera
+        move culled a second ago means rebuilding it the moment the camera
+        settles (the budget is soft under pressure)."""
         built = [t for t in self.tiles.values() if t.state == TileState.BUILT]
         if len(built) <= budget:
             return []
         candidates = [
-            t for t in built if not t.visible and t.key not in keep
+            t for t in built
+            if not t.visible
+            and t.key not in keep
+            and (now is None or now - t.last_wanted > grace_s)
         ]
         candidates.sort(key=lambda t: t.last_wanted)
         return candidates[: max(0, len(built) - budget)]

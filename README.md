@@ -144,11 +144,29 @@ python -m pytest tests/          # pure-python suite, no Blender needed
 without `bpy` — the decoder, tiling math, availability index, providers, and
 LOD traversal are all unit-tested outside Blender.
 
+## 3D Tiles
+
+The panel's **3D Tiles** box streams a 3D Tiles asset (ion asset ID — 96188
+= OSM Buildings — or a direct `tileset.json` URL) into the same ENU world as
+the terrain, with the same camera-driven SSE refinement:
+
+- Explicit 1.0/1.1 trees with external-tileset grafting, REPLACE and ADD
+  refinement, region/box/sphere bounding volumes (with the same
+  ellipsoid-bulge padding horizon culling needs), and per-tile transforms
+  (column-major, accumulated).
+- Content: `b3dm` (feature-table `RTC_CENTER` and glTF `CESIUM_RTC`
+  handled) and direct `glb`; `cmpt` recurses; `pnts`/`i3dm` are skipped.
+  Workers unwrap content to GLB files in the disk cache; Blender's own glTF
+  importer builds meshes/materials on the main thread (one import per tick),
+  so Draco and PBR come free.
+- Query parameters are inherited from each tileset's URL down to its
+  children (Google Photorealistic threads its session key that way).
+- Content beyond the LRU budget is torn down object → mesh → material →
+  image, like terrain tiles.
+
 ## Roadmap
 
 - Skirts to hide T-junction cracks between LOD levels (edge-vertex lists are
   already decoded).
 - Oct-encoded vertex normals → custom split normals (decoded, not yet applied).
-- 3D Tiles (b3dm/glTF) streaming behind the same provider/LOD contract.
-- Web-mercator imagery draping (would unlock most ion-hosted imagery; needs
-  per-vertex V reprojection and a mercator-aware ancestor pick).
+- 3D Tiles implicit tiling (1.1 subtrees) and `pnts`/`i3dm` content.

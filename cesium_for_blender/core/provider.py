@@ -260,6 +260,28 @@ class DiskCache:
             self.root, "stitched", "_".join(str(int(p)) for p in key) + ".png"
         )
 
+    def blob_path(self, kind: str, name: str, ext: str) -> str:
+        """<root>/<kind>/<name><ext> — for content addressed by URL hash
+        (3D Tiles URIs are arbitrary paths, unlike z/x/y tiles)."""
+        return os.path.join(self.root, kind, name + ext)
+
+    def put_blob(self, kind: str, name: str, ext: str, data: bytes) -> str:
+        d = os.path.join(self.root, kind)
+        os.makedirs(d, exist_ok=True)
+        final = os.path.join(d, name + ext)
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, final)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return final
+
     def get_terrain(self, z: int, x: int, y: int) -> bytes | None:
         p = self.terrain_path(z, x, y)
         try:
@@ -349,6 +371,98 @@ class TerrainProvider:
         data = self._get(self.tile_url(z, x, y), accept=TERRAIN_ACCEPT)
         self.cache.put("terrain", z, x, y, data, ".terrain")
         return data
+
+
+class Tiles3DProvider:
+    """3D Tiles content over HTTP: the base_url points at the root
+    tileset.json (ion 3DTILES endpoints resolve to exactly that). Content is
+    cached by URL hash — 3D Tiles URIs are arbitrary paths."""
+
+    def __init__(self, base_url: str, cache: DiskCache, ion: IonAsset | None = None):
+        self.base_url = base_url.strip()
+        self.cache = cache
+        self.ion = ion
+
+    def _get(self, url: str, accept: str) -> bytes:
+        try:
+            return _http_get(url, accept, headers=self.ion.headers() if self.ion else None)
+        except TileFetchError as e:
+            if self.ion is not None and "HTTP 401" in str(e):
+                self.ion.resolve()
+                return _http_get(url, accept, headers=self.ion.headers())
+            raise
+
+    def connect(self) -> str:
+        """Returns the root tileset.json URL."""
+        if self.ion is not None:
+            self.ion.resolve()
+            if self.ion.external_type == "3DTILES":
+                # externally hosted 3D Tiles (Google Photorealistic): the
+                # endpoint carries the provider's root URL and API key in
+                # options; the key rides the query string (Google protocol)
+                # and query inheritance threads it plus the per-session
+                # token through every child request
+                url = (self.ion.options.get("url") or "").strip()
+                if not url:
+                    raise TileFetchError(
+                        f"ion asset {self.ion.asset_id}: external 3DTILES"
+                        " endpoint has no url"
+                    )
+                key = self.ion.options.get("key")
+                if key and "key=" not in url:
+                    url += ("&" if "?" in url else "?") + "key=" + key
+                self.base_url = url
+            elif self.ion.external_type:
+                raise TileFetchError(
+                    f"ion asset {self.ion.asset_id} is externally hosted"
+                    f" ({self.ion.external_type}); not supported for 3D Tiles"
+                )
+            else:
+                if self.ion.asset_type != "3DTILES":
+                    raise TileFetchError(
+                        f"ion asset {self.ion.asset_id} is type"
+                        f" {self.ion.asset_type or '?'}, expected 3DTILES"
+                    )
+                self.base_url = self.ion.url
+            if not self.base_url.lower().split("?")[0].endswith(".json"):
+                self.base_url = self.base_url.rstrip("/") + "/tileset.json"
+        if not self.base_url:
+            raise TileFetchError("no tileset.json URL")
+        return self.base_url
+
+    @staticmethod
+    def _hash(url: str) -> str:
+        import hashlib
+
+        return hashlib.sha1(url.encode()).hexdigest()
+
+    def fetch_json(self, url: str) -> dict:
+        h = self._hash(url)
+        p = self.cache.blob_path("tiles3d", h, ".json")
+        try:
+            with open(p, "rb") as f:
+                return json.loads(f.read())
+        except (OSError, json.JSONDecodeError):
+            pass
+        data = self._get(url, accept="application/json,*/*")
+        doc = json.loads(data)          # validate before caching
+        self.cache.put_blob("tiles3d", h, ".json", data)
+        return doc
+
+    def fetch_content(self, url: str) -> bytes:
+        h = self._hash(url)
+        p = self.cache.blob_path("tiles3d", h, ".bin")
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except OSError:
+            pass
+        data = self._get(url, accept="*/*")
+        self.cache.put_blob("tiles3d", h, ".bin", data)
+        return data
+
+    def glb_path(self, url: str, index: int) -> str:
+        return self.cache.blob_path("glb", f"{self._hash(url)}_{index}", ".glb")
 
 
 def _bing_quadkey(m: int, x: int, y_top: int) -> str:

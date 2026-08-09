@@ -13,6 +13,7 @@ availability-convention test asserts predictions match reality.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -21,8 +22,13 @@ sys.path.insert(0, str(ROOT))
 
 from cesium_for_blender.core import provider, quantized_mesh, tiling  # noqa: E402
 
-TERRAIN_URL = "http://tile-server/api/terrain"
-IMAGERY_URL = "http://tile-server/api/tiles"
+# point these at your own server (env vars override the localhost defaults)
+TERRAIN_URL = os.environ.get(
+    "CESIUM_FIXTURE_TERRAIN_URL", "http://localhost:8080/api/terrain"
+)
+IMAGERY_URL = os.environ.get(
+    "CESIUM_FIXTURE_IMAGERY_URL", "http://localhost:8080/api/tiles"
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

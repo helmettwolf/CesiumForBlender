@@ -167,6 +167,42 @@ def test_wrong_asset_type_rejected(server, tmp_path):
         tp.connect()
 
 
+def test_external_3dtiles_asset_uses_provider_url_and_key(server, tmp_path):
+    """Google Photorealistic: ion answers externalType=3DTILES with the
+    provider root URL + API key in options; the key must ride the query."""
+    server.asset_types[2275207] = "3DTILES"
+    server.external[2275207] = "3DTILES"
+    # reuse FakeServer's external-endpoint shape via a custom route
+    orig = server.__class__.__call__
+
+    def call(self, url, accept="*/*", headers=None):
+        if "/v1/assets/2275207/endpoint" in url:
+            self.calls.append((url, dict(headers or {})))
+            return json.dumps({
+                "type": "3DTILES",
+                "externalType": "3DTILES",
+                "options": {
+                    "url": "https://tile.google.example/v1/3dtiles/root.json",
+                    "key": "goog-key",
+                },
+            }).encode()
+        return orig(self, url, accept, headers)
+
+    server.__class__.__call__ = call
+    try:
+        ion = provider.IonAsset(2275207, TOKEN)
+        prov = provider.Tiles3DProvider(
+            "", provider.DiskCache(str(tmp_path), ion.namespace), ion=ion
+        )
+        root_url = prov.connect()
+        assert root_url == (
+            "https://tile.google.example/v1/3dtiles/root.json?key=goog-key"
+        )
+        assert ion.access_token is None      # external: no ion Bearer
+    finally:
+        server.__class__.__call__ = orig
+
+
 def test_unsupported_external_asset_rejected(server, tmp_path):
     server.asset_types[99] = "IMAGERY"
     server.external[99] = "GOOGLE_EARTH_ENTERPRISE"
@@ -420,6 +456,6 @@ def test_layer_json_and_tile_metadata_compose():
 
 
 def test_url_namespace_slug():
-    ns = provider.url_namespace("http://tile-server/api/terrain")
-    assert ns == "tile-server_81_api_terrain"
+    ns = provider.url_namespace("http://10.0.0.1:81/api/terrain")
+    assert ns == "10.0.0.1_81_api_terrain"
     assert provider.url_namespace("https://a.example.com/x/") == "a.example.com_x"

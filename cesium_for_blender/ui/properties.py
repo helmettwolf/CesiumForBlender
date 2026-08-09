@@ -7,6 +7,8 @@ class CesiumSettings(bpy.types.PropertyGroup):
         items=(
             ("URL", "Server URL", "Self-hosted quantized-mesh server (layer.json)"),
             ("ION", "Cesium ion", "Stream an ion terrain asset by id + token"),
+            ("NONE", "None", "No terrain — for 3D Tiles that carry their own"
+             " ground (e.g. Google Photorealistic)"),
         ),
         default="URL",
     )
@@ -21,13 +23,15 @@ class CesiumSettings(bpy.types.PropertyGroup):
     )
     terrain_url: bpy.props.StringProperty(
         name="Terrain URL",
-        description="Quantized-mesh endpoint (serves layer.json)",
-        default="http://tile-server/api/terrain",
+        description="Quantized-mesh endpoint (serves layer.json),"
+        " e.g. http://localhost:8080/api/terrain",
+        default="http://localhost:8080/api/terrain",
     )
     imagery_url: bpy.props.StringProperty(
         name="Imagery URL",
-        description="TMS endpoint (serves tilemapresource.xml)",
-        default="http://tile-server/api/tiles",
+        description="TMS endpoint (serves tilemapresource.xml),"
+        " e.g. http://localhost:8080/api/tiles",
+        default="http://localhost:8080/api/tiles",
     )
     ion_token: bpy.props.StringProperty(
         name="ion Token", subtype="PASSWORD",
@@ -80,6 +84,35 @@ class CesiumSettings(bpy.types.PropertyGroup):
     cache_dir: bpy.props.StringProperty(
         name="Cache", subtype="DIR_PATH", default="",
         description="Disk cache for downloaded tiles (empty = LOCALAPPDATA)",
+    )
+    tiles3d_source: bpy.props.EnumProperty(
+        name="3D Tiles Source",
+        items=(
+            ("ION", "Cesium ion", "Stream an ion 3D Tiles asset by id + token"),
+            ("URL", "URL", "Direct URL to a tileset.json"),
+        ),
+        default="ION",
+    )
+    tiles3d_asset: bpy.props.IntProperty(
+        name="3D Tiles Asset ID", default=96188, min=1,
+        description="ion 3D Tiles asset id (96188 = OSM Buildings,"
+        " 2275207 = Google Photorealistic 3D Tiles)",
+    )
+    tiles3d_url: bpy.props.StringProperty(
+        name="Tileset URL", default="",
+        description="Direct URL to a 3D Tiles tileset.json",
+    )
+    tiles3d_budget: bpy.props.IntProperty(
+        name="Content Budget", default=150, min=20, max=2000,
+        description="Imported 3D Tiles contents kept in memory; hidden ones"
+        " beyond this are deleted (LRU)",
+    )
+    tiles3d_falloff: bpy.props.FloatProperty(
+        name="Detail Falloff (m)", default=600.0, min=100.0, max=10000.0,
+        description="Full detail within roughly this distance; farther areas"
+        " settle at progressively coarser levels (dynamic screen-space"
+        " error). Smaller = sharper nearby and less to stream; larger ="
+        " uniform detail and much more data",
     )
 
 

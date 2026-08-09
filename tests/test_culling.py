@@ -37,6 +37,28 @@ def test_horizon_limit_sees_local_radius():
     assert high > lod.horizon_limit(np.array([0.0, 0.0, 0.0]), frame) + 100_000
 
 
+def test_eviction_grace_spares_recently_wanted():
+    """A camera micro-move culls tiles for a moment; evicting them then
+    forces a rebuild the instant the camera settles. Tiles wanted within
+    the grace window must be spared even over budget."""
+    from cesium_for_blender.core.cache import TileCache, TileState
+
+    cache = TileCache()
+    now = 1000.0
+    for i in range(6):
+        t = cache.get_or_create((10, i, 0))
+        t.state = TileState.BUILT
+        t.visible = False
+        t.last_wanted = now - (1.0 if i < 4 else 60.0)   # 4 fresh, 2 stale
+    assert cache.evictable(set(), budget=2) != []        # no grace: evicts
+    victims = cache.evictable(set(), budget=2, now=now, grace_s=10.0)
+    assert [t.key for t in victims] == [(10, 4, 0), (10, 5, 0)]
+    # everything fresh -> nothing evictable despite the budget
+    for t in cache.tiles.values():
+        t.last_wanted = now
+    assert cache.evictable(set(), budget=2, now=now, grace_s=10.0) == []
+
+
 def test_low_camera_keeps_home_root_within_horizon():
     """End-to-end: the root CONTAINING the camera must survive horizon
     culling from a 1.3 km viewpoint (this exact camera starved the whole

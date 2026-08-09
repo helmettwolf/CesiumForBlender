@@ -22,16 +22,21 @@ class CESIUM_PT_main(bpy.types.Panel):
         row.prop(st, "terrain_source", expand=True)
         if st.terrain_source == "ION":
             box.prop(st, "ion_terrain_asset", text="Asset ID")
-        else:
+        elif st.terrain_source == "URL":
             box.prop(st, "terrain_url", text="Terrain")
-        row = box.row(align=True)
-        row.label(text="Imagery")
-        row.prop(st, "imagery_source", expand=True)
-        if st.imagery_source == "ION":
-            box.prop(st, "ion_imagery_asset", text="Asset ID")
-        elif st.imagery_source == "URL":
-            box.prop(st, "imagery_url", text="Imagery")
-        if st.terrain_source == "ION" or st.imagery_source == "ION":
+        if st.terrain_source != "NONE":
+            row = box.row(align=True)
+            row.label(text="Imagery")
+            row.prop(st, "imagery_source", expand=True)
+            if st.imagery_source == "ION":
+                box.prop(st, "ion_imagery_asset", text="Asset ID")
+            elif st.imagery_source == "URL":
+                box.prop(st, "imagery_url", text="Imagery")
+        if (
+            st.terrain_source == "ION"
+            or (st.terrain_source != "NONE" and st.imagery_source == "ION")
+            or st.tiles3d_source == "ION"
+        ):
             box.prop(st, "ion_token", text="ion Token")
         row = box.row()
         row.operator("cesium.connect", icon="LINKED")
@@ -59,6 +64,39 @@ class CESIUM_PT_main(bpy.types.Panel):
         else:
             row.operator("cesium.start", icon="PLAY")
         row.operator("cesium.clear", icon="TRASH")
+
+        box = layout.box()
+        box.label(text="3D Tiles", icon="MESH_ICOSPHERE")
+        from ..core import tiles3d_streamer
+        s3 = tiles3d_streamer.get()
+        tiles3d_streamer.ensure_timer()
+        row = box.row(align=True)
+        row.prop(st, "tiles3d_source", expand=True)
+        if st.tiles3d_source == "ION":
+            box.prop(st, "tiles3d_asset", text="Asset ID")
+        else:
+            box.prop(st, "tiles3d_url", text="URL")
+        box.prop(st, "tiles3d_budget", text="Budget")
+        box.prop(st, "tiles3d_falloff", text="Detail Falloff")
+        row = box.row(align=True)
+        row.operator("cesium.tiles3d_connect", text="Connect", icon="LINKED")
+        if s3.running:
+            row.operator("cesium.tiles3d_stop", icon="PAUSE")
+        else:
+            row.operator("cesium.tiles3d_start", text="Start", icon="PLAY")
+        row.operator("cesium.tiles3d_clear", text="", icon="TRASH")
+        if s3.connected:
+            col = box.column(align=True)
+            col.label(
+                text=f"{s3.stats.status}   Visible: {s3.stats.visible}"
+                f"   Built: {s3.stats.built}"
+            )
+            col.label(
+                text=f"Fetching: {s3.stats.fetching}   Queued: "
+                f"{s3.stats.queued}   Dead: {s3.stats.dead}"
+            )
+            if s3.stats.last_error:
+                col.label(text=s3.stats.last_error, icon="ERROR")
 
         box = layout.box()
         box.label(text="Atmosphere & Style", icon="WORLD_DATA")

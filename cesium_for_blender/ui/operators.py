@@ -4,7 +4,7 @@ import traceback
 import bpy
 
 from ..core import (camera, clouds, map_style, provider, quantized_mesh,
-                    scene_builder, streamer, tiling)
+                    scene_builder, streamer, tiles3d_streamer, tiling)
 
 
 def _ion_token(st) -> str:
@@ -24,6 +24,16 @@ class CESIUM_OT_connect(bpy.types.Operator):
         st = context.scene.cesium
         s = streamer.get()
         root = st.cache_dir or None
+
+        if st.terrain_source == "NONE":
+            # terrain-less session (3D Tiles carry their own ground): only
+            # the origin matters; nothing to connect here
+            s.stats.status = "no terrain"
+            self.report(
+                {"INFO"},
+                "No terrain source — set an origin and stream 3D Tiles",
+            )
+            return {"FINISHED"}
 
         if st.terrain_source == "ION" or st.imagery_source == "ION":
             token = _ion_token(st)
@@ -137,6 +147,9 @@ class CESIUM_OT_set_origin(bpy.types.Operator):
         camera.frame_origin()
         if was_running:
             s.start()
+        s3 = tiles3d_streamer.get()
+        if s3.connected:
+            s3.reset_for_origin(s.frame)   # ENU-relative content moved
         self.report(
             {"INFO"}, f"Origin at lat={st.origin_lat:.5f} lon={st.origin_lon:.5f}"
         )
@@ -268,6 +281,97 @@ class CESIUM_OT_load_single_tile(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CESIUM_OT_tiles3d_connect(bpy.types.Operator):
+    bl_idname = "cesium.tiles3d_connect"
+    bl_label = "Connect 3D Tiles"
+    bl_description = (
+        "Fetch and parse the root tileset.json (ion asset or direct URL)."
+        " Uses the same origin as terrain — set one first"
+    )
+
+    def execute(self, context):
+        st = context.scene.cesium
+        s = streamer.get()
+        if s.frame is None:
+            self.report({"ERROR"}, "Set an origin first (shared with terrain)")
+            return {"CANCELLED"}
+        root = st.cache_dir or None
+        if st.tiles3d_source == "ION":
+            token = _ion_token(st)
+            if not token:
+                self.report({"ERROR"}, "Cesium ion token missing")
+                return {"CANCELLED"}
+            ion = provider.IonAsset(st.tiles3d_asset, token)
+            prov = provider.Tiles3DProvider(
+                "", provider.DiskCache(root, ion.namespace), ion=ion
+            )
+        else:
+            if not st.tiles3d_url.strip():
+                self.report({"ERROR"}, "Enter a tileset.json URL")
+                return {"CANCELLED"}
+            prov = provider.Tiles3DProvider(
+                st.tiles3d_url.strip(),
+                provider.DiskCache(
+                    root, provider.url_namespace(st.tiles3d_url)
+                ),
+            )
+        s3 = tiles3d_streamer.get()
+        try:
+            node = s3.connect(prov, s.frame)
+        except Exception as e:
+            s3.stats.status = "connect failed"
+            self.report({"ERROR"}, f"3D Tiles connect failed: {e}")
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            f"3D Tiles connected: root ge={node.geometric_error:.0f},"
+            f" {len(s3.tileset.nodes)} tiles parsed",
+        )
+        return {"FINISHED"}
+
+
+class CESIUM_OT_tiles3d_start(bpy.types.Operator):
+    bl_idname = "cesium.tiles3d_start"
+    bl_label = "Start 3D Tiles"
+    bl_description = "Stream 3D Tiles content with camera-driven LOD"
+
+    def execute(self, context):
+        st = context.scene.cesium
+        s3 = tiles3d_streamer.get()
+        if not s3.connected:
+            self.report({"ERROR"}, "Connect 3D Tiles first")
+            return {"CANCELLED"}
+        s3.sse_threshold = st.sse_threshold
+        s3.content_budget = st.tiles3d_budget
+        s3.detail_falloff = st.tiles3d_falloff
+        try:
+            s3.start()
+        except Exception as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class CESIUM_OT_tiles3d_stop(bpy.types.Operator):
+    bl_idname = "cesium.tiles3d_stop"
+    bl_label = "Stop"
+    bl_description = "Stop 3D Tiles streaming (built content stays)"
+
+    def execute(self, context):
+        tiles3d_streamer.get().stop()
+        return {"FINISHED"}
+
+
+class CESIUM_OT_tiles3d_clear(bpy.types.Operator):
+    bl_idname = "cesium.tiles3d_clear"
+    bl_label = "Clear"
+    bl_description = "Stop and remove all streamed 3D Tiles content"
+
+    def execute(self, context):
+        tiles3d_streamer.get().clear()
+        return {"FINISHED"}
+
+
 class CESIUM_OT_add_clouds(bpy.types.Operator):
     """Add (or re-center) a volumetric cloud layer above the active camera.
     Tweak coverage/altitude/density in the redo panel (F9) after clicking."""
@@ -381,6 +485,10 @@ _CLASSES = (
     CESIUM_OT_stop,
     CESIUM_OT_clear,
     CESIUM_OT_load_single_tile,
+    CESIUM_OT_tiles3d_connect,
+    CESIUM_OT_tiles3d_start,
+    CESIUM_OT_tiles3d_stop,
+    CESIUM_OT_tiles3d_clear,
     CESIUM_OT_add_clouds,
     CESIUM_OT_remove_clouds,
     CESIUM_OT_relief_style,

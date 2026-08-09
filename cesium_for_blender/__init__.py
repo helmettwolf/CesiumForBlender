@@ -29,11 +29,13 @@ if _HAS_BPY:
         import importlib
 
         from .core import (cache, camera, lod, provider, quantized_mesh,
-                           scene_builder, streamer, tiling, wgs84)
+                           scene_builder, streamer, tiles3d, tiles3d_streamer,
+                           tiling, wgs84)
 
         streamer.shutdown()
+        tiles3d_streamer.shutdown()
         for _m in (wgs84, tiling, quantized_mesh, provider, cache, lod,
-                   camera, scene_builder, streamer):
+                   camera, scene_builder, streamer, tiles3d, tiles3d_streamer):
             importlib.reload(_m)
         importlib.reload(properties)  # noqa: F821
         importlib.reload(operators)   # noqa: F821
@@ -47,8 +49,9 @@ if _HAS_BPY:
         panel.register()
 
     def unregister():
-        from .core import streamer
+        from .core import streamer, tiles3d_streamer
         streamer.shutdown()
+        tiles3d_streamer.shutdown()
         panel.unregister()
         operators.unregister()
         properties.unregister()

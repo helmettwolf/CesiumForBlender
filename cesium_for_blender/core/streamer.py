@@ -31,6 +31,8 @@ RETRY_BACKOFF_S = (1.0, 4.0, 15.0)
 # Deleting a burst of objects in one tick hitches the depsgraph; spread
 # eviction over passes instead (they run every EVICT_PERIOD_S anyway).
 EVICT_MAX_PER_PASS = 24
+# never evict tiles wanted this recently (camera-move churn guard)
+EVICT_GRACE_S = 10.0
 BREAKER_THRESHOLD = 8       # consecutive CONNECTION failures (not HTTP errors)
 BREAKER_PROBE_PERIOD_S = 10.0
 
@@ -470,7 +472,10 @@ class Streamer:
                 self.executor.submit(self._worker_load, key, self.generation)
 
     def _evict(self):
-        victims = self.tiles.evictable(self._current.keep, self.tile_budget)
+        victims = self.tiles.evictable(
+            self._current.keep, self.tile_budget,
+            now=time.monotonic(), grace_s=EVICT_GRACE_S,
+        )
         victims = victims[:EVICT_MAX_PER_PASS]
         for tile in victims:
             scene_builder.destroy_tile_object(tile.key)
