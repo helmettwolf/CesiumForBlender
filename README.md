@@ -1,9 +1,10 @@
 # Cesium for Blender
 
-Camera-driven LOD streaming of Cesium **quantized-mesh terrain** and **TMS
-satellite imagery** into the Blender viewport — like CesiumJS, but pure Python
-inside Blender. Move the viewport camera and tiles stream, refine, coarsen,
-hide, and unload automatically.
+Camera-driven LOD streaming of Cesium **quantized-mesh terrain**, **TMS/Bing
+satellite imagery**, and **3D Tiles** (OSM Buildings, Google Photorealistic
+3D Tiles) into the Blender viewport — like CesiumJS, but pure Python inside
+Blender. Move the viewport camera and tiles stream, refine, coarsen, hide,
+and unload automatically.
 
 ![status](https://img.shields.io/badge/status-v0.1-blue) Blender 4.0+ · no
 external dependencies (numpy + stdlib only).
@@ -88,6 +89,40 @@ Blender → Edit → Preferences → Add-ons → Install… → `dist/cesium_for
 Diagnostic: **Load Single Tile** synchronously builds one tile (bypasses the
 streamer) — useful to sanity-check a server.
 
+### 3D Tiles
+
+The **3D Tiles** box streams a 3D Tiles asset into the same ENU world as the
+terrain (buildings land on the streamed ground), with its own camera-driven
+SSE refinement. Sources: an ion asset ID — 96188 = OSM Buildings, 2275207 =
+Google Photorealistic 3D Tiles — or a direct `tileset.json` URL. For
+Photorealistic-style datasets that carry their own ground, set the terrain
+source to **None** and just anchor an origin.
+
+- **Format coverage** — explicit 1.0/1.1 trees with lazy external-tileset
+  grafting, REPLACE and ADD refinement, region/box/sphere bounding volumes
+  (with the same ellipsoid-bulge padding horizon culling needs), per-tile
+  column-major transforms, accumulated. Content: `b3dm` (feature-table
+  `RTC_CENTER` and glTF `CESIUM_RTC` handled), direct `glb`, recursive
+  `cmpt`; `pnts`/`i3dm` are skipped. Externally-hosted ion assets (Google)
+  resolve to the provider's root URL + API key, and query parameters are
+  inherited from each tileset's URL down to its children — that is how
+  Google's per-session keys thread through.
+- **Import path** — workers fetch and unwrap content to GLB files in the
+  disk cache; Blender's own glTF importer builds meshes/materials on the
+  main thread (one import per tick), so Draco and PBR come free. Builds are
+  validated (missing or cancelled imports retry with backoff).
+- **Detail Falloff** (dynamic screen-space error) — the refinement
+  threshold grows with distance, so full detail concentrates within roughly
+  the falloff radius (default 600 m) and far areas settle at coarse levels.
+  Without it, a street-level view of a dense city demands maximum detail to
+  the horizon and streaming never converges.
+- **Stability** — a parent is only swapped out when its entire visible
+  replacement subtree is ready (through contentless intermediate nodes), so
+  moving the camera never leaves holes; eviction runs on a 2 s cadence with
+  a 10 s wanted-recently grace and a soft LRU budget, so a small camera move
+  upgrades meshes in place instead of reloading the area. Teardown is a
+  single `batch_remove` per node (object → mesh → material → image).
+
 ### Atmosphere & Style → Relief Map Style
 
 One click swaps the satellite imagery for an Owen Powell-style relief-model
@@ -144,29 +179,13 @@ python -m pytest tests/          # pure-python suite, no Blender needed
 without `bpy` — the decoder, tiling math, availability index, providers, and
 LOD traversal are all unit-tested outside Blender.
 
-## 3D Tiles
-
-The panel's **3D Tiles** box streams a 3D Tiles asset (ion asset ID — 96188
-= OSM Buildings — or a direct `tileset.json` URL) into the same ENU world as
-the terrain, with the same camera-driven SSE refinement:
-
-- Explicit 1.0/1.1 trees with external-tileset grafting, REPLACE and ADD
-  refinement, region/box/sphere bounding volumes (with the same
-  ellipsoid-bulge padding horizon culling needs), and per-tile transforms
-  (column-major, accumulated).
-- Content: `b3dm` (feature-table `RTC_CENTER` and glTF `CESIUM_RTC`
-  handled) and direct `glb`; `cmpt` recurses; `pnts`/`i3dm` are skipped.
-  Workers unwrap content to GLB files in the disk cache; Blender's own glTF
-  importer builds meshes/materials on the main thread (one import per tick),
-  so Draco and PBR come free.
-- Query parameters are inherited from each tileset's URL down to its
-  children (Google Photorealistic threads its session key that way).
-- Content beyond the LRU budget is torn down object → mesh → material →
-  image, like terrain tiles.
-
 ## Roadmap
 
+3D Tiles streaming shipped (see above) — remaining gaps and ideas:
+
+- 3D Tiles implicit tiling (1.1 subtrees) and point-cloud content
+  (`pnts`/`i3dm`) — the b3dm/glb/cmpt pipeline incl. Google Photorealistic
+  is implemented.
 - Skirts to hide T-junction cracks between LOD levels (edge-vertex lists are
   already decoded).
 - Oct-encoded vertex normals → custom split normals (decoded, not yet applied).
-- 3D Tiles implicit tiling (1.1 subtrees) and `pnts`/`i3dm` content.
