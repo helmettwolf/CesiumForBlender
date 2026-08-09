@@ -265,12 +265,29 @@ def remove(context) -> int:
         z, x, y = obj["cesium_key"]
         mat = None
         if s.imagery is not None:
-            ikey, *_ = tiling.imagery_key_and_uv_transform(
-                z, x, y, s.imagery.max_zoom
-            )
-            path = s.imagery.cache.imagery_path(*ikey)
-            if path is not None:
-                mat = scene_builder.get_or_create_material(ikey, path)
+            # the exact imagery tile whose projection is baked into the UVs
+            # is remembered on the object (works for both geodetic and
+            # mercator schemes); fall back to recomputing the geodetic key
+            # for objects built before that property existed
+            ikey = obj.get("cesium_img")
+            if ikey is not None:
+                ikey = tuple(ikey)
+            elif s.imagery.scheme == "geodetic":
+                ikey, *_ = tiling.imagery_key_and_uv_transform(
+                    z, x, y, s.imagery.max_zoom
+                )
+            if ikey is not None:
+                paths = s.imagery.paths_for_key(ikey)
+                if paths is not None:
+                    tag = "M" if s.imagery.scheme == "mercator" else ""
+                    sp = (
+                        s.imagery.cache.stitched_path(ikey)
+                        if len(paths) > 1
+                        else None
+                    )
+                    mat = scene_builder.get_or_create_material(
+                        ikey, paths, tag, sp
+                    )
         if mat is None:
             mat = scene_builder.get_or_create_gray_material()
         obj.data.materials.clear()

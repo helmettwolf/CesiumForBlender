@@ -52,7 +52,16 @@ def horizon_limit(cam_pos_enu: np.ndarray, frame) -> float:
     import math
 
     cam_ecef = frame.origin_ecef + frame.rot.T @ cam_pos_enu
-    h = max(float(np.linalg.norm(cam_ecef)) - EARTH_R, 0.0)
+    # height above the LOCAL geocentric radius — measuring against the
+    # equatorial radius made h collapse to 0 anywhere inland (the geocentric
+    # radius at lat 28 is ~5 km less than EARTH_R), so a low camera got a
+    # horizon limit shorter than the root tiles' distance and culled them
+    r_local = float(np.linalg.norm(frame.origin_ecef))
+    h = max(
+        float(np.linalg.norm(cam_ecef)) - r_local,
+        float(cam_pos_enu[2]),
+        0.0,
+    )
     cam_horizon = math.sqrt(h * (2.0 * EARTH_R + h))
     obj_horizon = math.sqrt(MAX_TERRAIN_H * (2.0 * EARTH_R + MAX_TERRAIN_H))
     return cam_horizon + obj_horizon
@@ -206,7 +215,12 @@ def _select_pass(
         kids = tiling.children(*key) if refinable else []
         if refinable:
             for k in kids:
-                if not avail.is_available(*k):
+                if not avail.is_available(*k) and k[0] > imagery_max_z:
+                    # no real child data AND imagery cannot sharpen either:
+                    # the true leaf. While imagery CAN still improve, missing
+                    # children are allowed — the streamer synthesizes them by
+                    # upsampling the nearest real ancestor (CesiumJS-style),
+                    # so subdivision continues past the dataset limit.
                     refinable = False
                     break
                 kt = cache.get(k)

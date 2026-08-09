@@ -8,6 +8,7 @@ Spec: https://github.com/CesiumGS/quantized-mesh
 
 from __future__ import annotations
 
+import gzip
 import json
 from dataclasses import dataclass, field
 
@@ -84,6 +85,13 @@ def _decode_high_water(codes: np.ndarray) -> np.ndarray:
 
 
 def decode(buf: bytes) -> QMTile:
+    if buf[:2] == b"\x1f\x8b":
+        # ion's CDN may answer gzip regardless of Accept-Encoding; the disk
+        # cache stores raw response bytes, so sniff here covers both paths
+        try:
+            buf = gzip.decompress(buf)
+        except OSError as e:
+            raise QMDecodeError(f"gzip tile failed to decompress: {e}") from e
     data = np.frombuffer(buf, dtype=np.uint8)
     n_bytes = data.size
     if n_bytes < 92:
@@ -182,6 +190,124 @@ def decode(buf: bytes) -> QMTile:
     )
 
 
+def _sample_tin(qm: QMTile, pts: np.ndarray) -> np.ndarray:
+    """Barycentric height interpolation of the tile's TIN at points given in
+    quantized uv space (float64, 0..32767). Chunked over triangles to bound
+    memory. Points that miss every triangle (eps/degenerate edge cases) fall
+    back to the nearest vertex height. Returns heights in quantized units."""
+    tri = qm.indices.astype(np.int64)
+    au = qm.u.astype(np.float64)
+    av = qm.v.astype(np.float64)
+    ah = qm.h.astype(np.float64)
+    tx, ty, th = au[tri], av[tri], ah[tri]          # (T, 3)
+    out = np.full(pts.shape[0], np.nan)
+    remaining = np.arange(pts.shape[0])
+    eps = 1e-9
+    CH = 512
+    for t0 in range(0, tri.shape[0], CH):
+        if remaining.size == 0:
+            break
+        x1, x2, x3 = (tx[t0:t0 + CH, i][:, None] for i in range(3))
+        y1, y2, y3 = (ty[t0:t0 + CH, i][:, None] for i in range(3))
+        h1, h2, h3 = (th[t0:t0 + CH, i][:, None] for i in range(3))
+        px = pts[remaining, 0][None, :]
+        py = pts[remaining, 1][None, :]
+        d = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w1 = ((y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)) / d
+            w2 = ((y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)) / d
+        w3 = 1.0 - w1 - w2
+        inside = (
+            np.isfinite(w1) & (w1 >= -eps) & (w2 >= -eps) & (w3 >= -eps)
+        )
+        has = inside.any(axis=0)
+        if not has.any():
+            continue
+        first = inside.argmax(axis=0)
+        heights = w1 * h1 + w2 * h2 + w3 * h3        # (C, R)
+        cols = np.nonzero(has)[0]
+        out[remaining[cols]] = heights[first[cols], cols]
+        remaining = remaining[~has]
+    if remaining.size:
+        d2 = (
+            (au[None, :] - pts[remaining, 0][:, None]) ** 2
+            + (av[None, :] - pts[remaining, 1][:, None]) ** 2
+        )
+        out[remaining] = ah[d2.argmin(axis=1)]
+    return out
+
+
+def upsample(
+    qm: QMTile, ancestor_key: tuple, key: tuple, grid_n: int = 33
+) -> QMTile:
+    """Synthesize a descendant tile from a REAL ancestor's mesh — CesiumJS-
+    style refinement past the dataset's resolution limit, so tiles keep
+    subdividing (and imagery keeps sharpening per subdivided tile) even when
+    the backend has no deeper terrain.
+
+    The ancestor TIN is resampled on a regular grid over the descendant's
+    sub-rect. Always upsample from the deepest REAL ancestor (never from
+    another synthetic tile) so error does not accumulate. Adjacent siblings
+    sample bit-identical boundary points (dyadic fractions of the ancestor's
+    uv square), so shared edges are watertight."""
+    az, ax, ay = ancestor_key
+    z, x, y = key
+    dz = z - az
+    if dz <= 0:
+        raise ValueError(f"{key} is not a descendant of {ancestor_key}")
+    span = 1.0 / (1 << dz)
+    u0 = (x - (ax << dz)) * span
+    v0 = (y - (ay << dz)) * span
+    frac = np.linspace(0.0, 1.0, grid_n)
+    us = (u0 + frac * span) * QUANT_MAX
+    vs = (v0 + frac * span) * QUANT_MAX
+    ug, vg = np.meshgrid(us, vs)                     # rows=v, cols=u
+    pts = np.stack([ug.ravel(), vg.ravel()], axis=-1)
+    hq = _sample_tin(qm, pts)                        # ancestor-quantized units
+    h_m = qm.min_h + hq / QUANT_MAX * (qm.max_h - qm.min_h)
+
+    min_h = float(h_m.min())
+    max_h = float(h_m.max())
+    h_range = max_h - min_h
+    if h_range > 0.0:
+        ch = np.round((h_m - min_h) / h_range * QUANT_MAX).astype(np.int32)
+    else:
+        ch = np.zeros(h_m.shape[0], dtype=np.int32)
+
+    q = np.round(frac * QUANT_MAX).astype(np.int32)
+    cu = np.tile(q, grid_n)
+    cv = np.repeat(q, grid_n)
+
+    n = grid_n
+    r = np.arange(n - 1)
+    i0 = (r[:, None] * n + r[None, :]).ravel()       # SW corner of each quad
+    # CCW in (u=east, v=north) == outward-facing, matching real tiles
+    tris = np.concatenate(
+        [
+            np.stack([i0, i0 + 1, i0 + n + 1], axis=-1),
+            np.stack([i0, i0 + n + 1, i0 + n], axis=-1),
+        ]
+    ).astype(np.uint32)
+
+    idx = np.arange(n * n).reshape(n, n)
+    return QMTile(
+        center_ecef=qm.center_ecef,
+        min_h=min_h,
+        max_h=max_h,
+        bs_center=qm.bs_center,
+        bs_radius=qm.bs_radius,
+        horizon_occlusion=qm.horizon_occlusion,
+        u=cu,
+        v=cv,
+        h=ch,
+        indices=tris,
+        west_i=idx[:, 0].astype(np.uint32),
+        south_i=idx[0, :].astype(np.uint32),
+        east_i=idx[:, -1].astype(np.uint32),
+        north_i=idx[-1, :].astype(np.uint32),
+    )
+
+
 def tile_to_enu_mesh(
     qm: QMTile,
     key: tuple,
@@ -189,9 +315,16 @@ def tile_to_enu_mesh(
     uv_scale: float = 1.0,
     uv_off: tuple[float, float] = (0.0, 0.0),
     imagery_key: tuple | None = None,
+    mercator_rect: tuple | None = None,
 ) -> TileMeshData:
     """Second decode stage (still worker-side): quantized -> geodetic -> ECEF
-    -> ENU float32 vertices, plus flat per-loop UVs ready for foreach_set."""
+    -> ENU float32 vertices, plus flat per-loop UVs ready for foreach_set.
+
+    UVs come in two flavors: geodetic imagery uses the linear
+    uv_scale/uv_off sub-window of an ancestor tile; web-mercator imagery
+    (Bing, mercator TMS) instead passes mercator_rect — the covering mercator
+    tile's normalized bounds — and each vertex is reprojected (u linear in
+    lon, v nonlinear via the mercator y of its latitude)."""
     z, x, y = key
     west, south, east, north = tiling.tile_rect(z, x, y)
 
@@ -211,9 +344,15 @@ def tile_to_enu_mesh(
         indices = indices[:, ::-1]
     loop_verts = indices.ravel().astype(np.int32)
 
-    uv_u = (fu * uv_scale + uv_off[0]).astype(np.float32)
-    v_src = (1.0 - fv) if FLIP_V else fv
-    uv_v = (v_src * uv_scale + uv_off[1]).astype(np.float32)
+    if mercator_rect is not None:
+        mx, my = tiling.merc_norm_xy(lon, lat)
+        x0, y0, x1, y1 = mercator_rect
+        uv_u = np.clip((mx - x0) / (x1 - x0), 0.0, 1.0).astype(np.float32)
+        uv_v = np.clip((my - y0) / (y1 - y0), 0.0, 1.0).astype(np.float32)
+    else:
+        uv_u = (fu * uv_scale + uv_off[0]).astype(np.float32)
+        v_src = (1.0 - fv) if FLIP_V else fv
+        uv_v = (v_src * uv_scale + uv_off[1]).astype(np.float32)
     per_vertex_uv = np.stack([uv_u, uv_v], axis=-1)
     loop_uvs = per_vertex_uv[loop_verts].ravel()
 

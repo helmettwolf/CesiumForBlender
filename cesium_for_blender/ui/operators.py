@@ -1,3 +1,4 @@
+import os
 import traceback
 
 import bpy
@@ -6,26 +7,98 @@ from ..core import (camera, clouds, map_style, provider, quantized_mesh,
                     scene_builder, streamer, tiling)
 
 
+def _ion_token(st) -> str:
+    return st.ion_token.strip() or os.environ.get("CESIUM_ION_TOKEN", "").strip()
+
+
 class CESIUM_OT_connect(bpy.types.Operator):
     bl_idname = "cesium.connect"
     bl_label = "Connect"
-    bl_description = "Fetch layer.json + tilemapresource.xml and seed tile availability"
+    bl_description = (
+        "Connect terrain + imagery sources (server layer.json/"
+        "tilemapresource.xml, or Cesium ion asset endpoints) and seed tile"
+        " availability"
+    )
 
     def execute(self, context):
         st = context.scene.cesium
         s = streamer.get()
-        try:
-            s.connect(st.terrain_url, st.imagery_url, st.cache_dir)
-        except Exception as e:
+        root = st.cache_dir or None
+
+        if st.terrain_source == "ION" or st.imagery_source == "ION":
+            token = _ion_token(st)
+            if not token:
+                self.report(
+                    {"ERROR"},
+                    "Cesium ion token missing — paste it in the panel or set"
+                    " CESIUM_ION_TOKEN",
+                )
+                return {"CANCELLED"}
+
+        if st.terrain_source == "ION":
+            ion = provider.IonAsset(st.ion_terrain_asset, token)
+            terrain = provider.TerrainProvider(
+                "", provider.DiskCache(root, ion.namespace), ion=ion
+            )
+        else:
+            terrain = provider.TerrainProvider(
+                st.terrain_url,
+                provider.DiskCache(root, provider.url_namespace(st.terrain_url)),
+            )
+
+        imagery = None
+        if st.imagery_source == "ION":
+            ion = provider.IonAsset(st.ion_imagery_asset, token)
+            imagery = provider.ImageryProvider(
+                "", provider.DiskCache(root, ion.namespace), ion=ion
+            )
+        elif st.imagery_source == "URL":
+            imagery = provider.ImageryProvider(
+                st.imagery_url,
+                provider.DiskCache(root, provider.url_namespace(st.imagery_url)),
+            )
+
+        err = None
+        for attempt in (1, 2):     # transient endpoint/metadata hiccups are
+            try:                   # common enough to deserve one retry
+                s.connect(terrain, imagery)
+                s.stats.last_error = ""
+                err = None
+                break
+            except Exception as e:
+                err = e
+        if err is not None:
+            # a dead imagery source shouldn't block terrain — but say so
+            # LOUDLY (status box), not just a toast: a silent downgrade
+            # reads as "LOD is broken" when every new tile builds gray
+            if imagery is not None:
+                try:
+                    s.connect(terrain, None)
+                    s.stats.last_error = f"imagery off: {err}"
+                    self.report(
+                        {"WARNING"},
+                        f"Imagery unavailable ({err}) — streaming terrain"
+                        " only; press Connect to retry",
+                    )
+                    return {"FINISHED"}
+                except Exception:
+                    pass
             s.stats.status = "connect failed"
-            self.report({"ERROR"}, f"Connect failed: {e}")
+            self.report({"ERROR"}, f"Connect failed: {err}")
             return {"CANCELLED"}
         layer = s.terrain.layer or {}
+        imagery_desc = (
+            f"imagery '{s.imagery.title}' z0-{s.imagery.max_zoom}"
+            if s.imagery is not None
+            else "no imagery"
+        )
+        credit = ""
+        if terrain.ion is not None and terrain.ion.attributions:
+            credit = f" — {terrain.ion.attributions[0]}"
         self.report(
             {"INFO"},
             f"Connected: {layer.get('format', '?')} z{layer.get('minzoom', 0)}-"
-            f"{layer.get('maxzoom', '?')}, imagery '{s.imagery.title}' "
-            f"z0-{s.imagery.max_zoom}",
+            f"{layer.get('maxzoom', '?')}, {imagery_desc}{credit}",
         )
         return {"FINISHED"}
 
@@ -151,15 +224,37 @@ class CESIUM_OT_load_single_tile(bpy.types.Operator):
             qm = quantized_mesh.decode(data)
             if qm.metadata and qm.metadata.get("available"):
                 s.avail.ingest(key, qm.metadata["available"])
-            ikey, scale, uo, vo = tiling.imagery_key_and_uv_transform(
-                *key, s.imagery.max_zoom
-            )
-            img_path = s.imagery.fetch_tile(*ikey)
+            ikey, img_paths = None, None
+            scale, uo, vo = 1.0, 0.0, 0.0
+            merc_rect = None
+            if s.imagery is not None and s.imagery.scheme == "mercator":
+                cover = tiling.mercator_cover(
+                    *key, s.imagery.merc_max_zoom, s.imagery.merc_min_zoom
+                )
+                if cover is not None:
+                    m, tx0, ty0, tx1, ty1 = cover
+                    img_paths = [
+                        s.imagery.fetch_tile(m, tx, ty)
+                        for ty in range(ty0, ty1 + 1)
+                        for tx in range(tx0, tx1 + 1)
+                    ]
+                    ikey = cover
+                    merc_rect = tiling.mercator_cover_rect(cover)
+            elif s.imagery is not None:
+                ikey, scale, uo, vo = tiling.imagery_key_and_uv_transform(
+                    *key, s.imagery.max_zoom
+                )
+                img_paths = [s.imagery.fetch_tile(*ikey)]
             md = quantized_mesh.tile_to_enu_mesh(
-                qm, key, s.frame, scale, (uo, vo), imagery_key=ikey
+                qm, key, s.frame, scale, (uo, vo), imagery_key=ikey,
+                mercator_rect=merc_rect,
             )
             scene_builder.destroy_tile_object(key)  # allow re-running
-            mat = scene_builder.get_or_create_material(ikey, img_path)
+            if img_paths:
+                tag = "M" if s.imagery.scheme == "mercator" else ""
+                mat = scene_builder.get_or_create_material(ikey, img_paths, tag)
+            else:
+                mat = scene_builder.get_or_create_gray_material()
             obj = scene_builder.build_tile_object(key, md, mat)
         except Exception as e:
             traceback.print_exc()
@@ -168,7 +263,7 @@ class CESIUM_OT_load_single_tile(bpy.types.Operator):
         self.report(
             {"INFO"},
             f"Tile {key}: {md.positions.shape[0]} verts, {md.tri_count} tris, "
-            f"imagery {ikey}",
+            f"imagery {ikey if ikey is not None else 'none'}",
         )
         return {"FINISHED"}
 

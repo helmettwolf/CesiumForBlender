@@ -85,6 +85,72 @@ def imagery_key_and_uv_transform(
     return uv_transform_to_ancestor(z, x, y, min(z, imagery_max_z))
 
 
+# ---------------------------------------------------------------- web mercator
+# Square scheme: level m has 2^m x 2^m tiles over lon +-180 deg, lat +-85.05
+# deg. y = 0 at the SOUTH edge (TMS), matching the geodetic scheme above;
+# quadkey providers (Bing) flip to their top-origin y at URL build time.
+
+MERC_LAT_LIMIT_RAD = math.atan(math.sinh(math.pi))   # +-85.0511 deg
+
+
+def merc_norm_xy(lon_rad, lat_rad):
+    """Normalized web-mercator coordinates in [0,1]^2 (y=0 at the south
+    limit). Accepts scalars or numpy arrays; latitude is clamped to the
+    mercator limit."""
+    x = (np.asarray(lon_rad) + math.pi) / (2.0 * math.pi)
+    lat = np.clip(lat_rad, -MERC_LAT_LIMIT_RAD, MERC_LAT_LIMIT_RAD)
+    y = (np.log(np.tan(0.25 * math.pi + 0.5 * lat)) + math.pi) / (2.0 * math.pi)
+    return x, y
+
+
+def mercator_cover(
+    z: int, x: int, y: int, max_m: int, min_m: int = 0, overzoom: int = 0
+) -> tuple[int, int, int, int, int] | None:
+    """Deepest mercator grid covering geodetic tile (z,x,y):
+    (m, tx0, ty0, tx1, ty1), at most 2^overzoom columns and 2^(overzoom+1)
+    rows; the builder stitches the grid into one texture.
+
+    With overzoom=0 that is ONE column and at most TWO stacked rows.
+    Requiring a single covering tile instead is a trap: away from the
+    equator a geodetic tile's latitude span exceeds a mercator row at
+    m = z+1 (span/row = 1/cos(lat)), so whether one tile covers depends on
+    row ALIGNMENT — one terrain tile nests, its neighbor straddles a
+    boundary and walks arbitrarily coarser (observed: imagery m=13 next to
+    m=9 at lat 28.6). A 1x2 stack always exists once the span fits two
+    rows, keeping adjacent terrain tiles within one imagery level.
+
+    overzoom>0 raises the level cap to m = z+1+overzoom with a
+    correspondingly larger grid — used for LEAF tiles (terrain that cannot
+    refine further, e.g. CWT stopping at z13 over much of Asia) so imagery
+    keeps sharpening beyond the mesh resolution.
+
+    Columns never straddle beyond the cap: geodetic columns align with
+    mercator columns at m = z+1, so m = z+1+k spans exactly 2^k columns.
+    None only when even [min_m, max_m] has no fit (min_m too high)."""
+    west, south, east, north = tile_rect(z, x, y)
+    x0, y0 = merc_norm_xy(west, south)
+    x1, y1 = merc_norm_xy(east, north)
+    eps = 1e-9
+    max_cols = 1 << overzoom
+    max_rows = 2 << overzoom
+    for m in range(min(z + 1 + overzoom, max_m), min_m - 1, -1):
+        n = 1 << m
+        tx0 = min(int((x0 + eps) * n), n - 1)
+        tx1 = min(int((x1 - eps) * n), n - 1)
+        ty0 = min(int((y0 + eps) * n), n - 1)
+        ty1 = min(int((y1 - eps) * n), n - 1)
+        if tx1 - tx0 < max_cols and ty1 - ty0 < max_rows:
+            return (m, tx0, ty0, tx1, ty1)
+    return None
+
+
+def mercator_cover_rect(cover: tuple) -> tuple[float, float, float, float]:
+    """Normalized bounds of the cover grid, for UV mapping."""
+    m, tx0, ty0, tx1, ty1 = cover
+    n = 1 << m
+    return (tx0 / n, ty0 / n, (tx1 + 1) / n, (ty1 + 1) / n)
+
+
 def estimate_tile_aabb(
     z: int,
     x: int,
@@ -104,7 +170,14 @@ def estimate_tile_aabb(
     lat_f = np.concatenate([lat_g.ravel(), lat_g.ravel()])
     h_f = np.concatenate([np.full(25, min_h), np.full(25, max_h)])
     enu = frame.geodetic_to_enu(lon_f, lat_f, h_f)
-    return enu.min(axis=0), enu.max(axis=0)
+    # Between samples the ellipsoid bulges toward the viewer by up to
+    # s^2/(2R) (s = sample arc spacing): ~2000 km for a hemisphere root,
+    # millimeters at z10. Without this margin a root tile's AABB can sit
+    # hundreds of km "below" a camera standing right on it, and horizon
+    # culling then starves the whole quadtree from a low viewpoint.
+    s = wgs84.A * max(east - west, north - south) / 4.0
+    margin = min(s * s / (2.0 * wgs84.A), wgs84.A)
+    return enu.min(axis=0) - margin, enu.max(axis=0) + margin
 
 
 class AvailabilityIndex:
@@ -147,6 +220,15 @@ class AvailabilityIndex:
                 return off
         return 1  # malformed either way; prefer the observed server convention
 
+    def _add_rects_locked(self, lvl: int, rects: list):
+        arr = np.array(
+            [[r["startX"], r["startY"], r["endX"], r["endY"]] for r in rects],
+            dtype=np.int64,
+        )
+        self._rects.setdefault(lvl, []).append(arr)
+        self._merged.pop(lvl, None)
+        self._max_known = max(self._max_known, lvl)
+
     def ingest(self, key: TileKey, available: list) -> bool:
         """Merge a tile's metadata 'available' array. Returns True if new."""
         if not available:
@@ -158,16 +240,27 @@ class AvailabilityIndex:
             self._ingested.add(key)
             off = self._detect_offset(z, available)
             for i, rects in enumerate(available):
-                if not rects:
-                    continue
-                lvl = z + off + i
-                arr = np.array(
-                    [[r["startX"], r["startY"], r["endX"], r["endY"]] for r in rects],
-                    dtype=np.int64,
-                )
-                self._rects.setdefault(lvl, []).append(arr)
-                self._merged.pop(lvl, None)
-                self._max_known = max(self._max_known, lvl)
+                if rects:
+                    self._add_rects_locked(z + off + i, rects)
+            self.generation += 1
+        return True
+
+    def ingest_layer_json(self, available: list) -> bool:
+        """Merge layer.json's 'available' array. Unlike tile metadata this is
+        ALWAYS the absolute convention — available[i] = rects for level i
+        (Cesium ion / CWT publish levels 0..metadataAvailability here; deeper
+        levels arrive via tile metadata). Offset detection must not run: the
+        subtree convention would also fit and shift everything one level."""
+        if not available:
+            return False
+        marker = ("layer.json",)
+        with self._lock:
+            if marker in self._ingested:
+                return False
+            self._ingested.add(marker)
+            for i, rects in enumerate(available):
+                if rects:
+                    self._add_rects_locked(i, rects)
             self.generation += 1
         return True
 

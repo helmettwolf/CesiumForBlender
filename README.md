@@ -16,6 +16,13 @@ external dependencies (numpy + stdlib only).
   threshold (default 16 px). Geometric errors come from the server's per-tile
   `metadata` extension, floored by an imagery-texel term so flat regions keep
   refining until the *texture* is sharp, not just the geometry.
+- **Upsampled (synthetic) tiles** — past the terrain dataset's resolution
+  limit (e.g. Cesium World Terrain stops at z13 over much of Asia),
+  subdivision continues CesiumJS-style: missing children are synthesized by
+  resampling the nearest REAL ancestor's TIN on a regular grid (barycentric,
+  in quantized uv space — sibling edges sample identical points, so no new
+  cracks), and each smaller tile drapes its own sharper imagery. Refinement
+  stops when the *imagery* is exhausted, not the terrain.
 - **Replacement refinement** — children replace their parent only when all
   four are built, so the ground never has holes while loading.
 - **Culling** — view-frustum test plus ellipsoid horizon culling (tiles beyond
@@ -42,13 +49,41 @@ Blender → Edit → Preferences → Add-ons → Install… → `dist/cesium_for
 
 ## Use (N-panel → "Cesium" tab)
 
-1. **Connect** — reads `layer.json` + `tilemapresource.xml` and seeds tile
-   availability from the root tiles' metadata.
-2. **Data Center** (or type a lat/lon and press **Go To**) — anchors the
+1. **Sources** — pick terrain and imagery sources independently:
+   - **Server URL** — self-hosted `layer.json` / `tilemapresource.xml` stack.
+   - **Cesium ion** — asset ID + access token
+     ([cesium.com/ion/tokens](https://cesium.com/ion/tokens)); terrain asset 1
+     is Cesium World Terrain. The asset endpoint is resolved via ion's REST
+     API and tiles are fetched with the returned short-lived Bearer token
+     (auto-refreshed on 401). The token can also come from a
+     `CESIUM_ION_TOKEN` environment variable instead of the panel field.
+     Imagery assets may be ion-hosted TMS (geodetic **or** web-mercator,
+     e.g. 3954 = Sentinel-2) or **Bing** external assets (2 = Aerial,
+     3 = Aerial with labels, 4 = Road): ion hands over a Bing key, tiles are
+     fetched by quadkey from Bing's REST metadata template. Mercator imagery
+     is draped by covering each terrain tile with ONE mercator column and at
+     most TWO stacked rows at the deepest level that fits (columns align at
+     mercator z+1; rows are nonlinear in latitude, so a single-tile cover
+     would depend on row alignment and let adjacent terrain tiles land many
+     imagery levels apart). Row pairs are stitched into one texture at build
+     time and UVs are reprojected per vertex — u linear in longitude, v
+     through the mercator latitude function — keeping neighbors within one
+     imagery level. LEAF tiles (terrain at its dataset limit, e.g. CWT
+     stopping at z13 over much of Asia) drape an overzoomed grid two levels
+     deeper (up to 4x8 tiles stitched, ~8x sharper) so imagery keeps
+     improving past the mesh resolution. Other external types (Google
+     Earth Enterprise, ArcGIS) are rejected with a clear message.
+   - **None** (imagery) — terrain only, flat gray; pairs well with the
+     Relief Map Style.
+2. **Connect** — reads `layer.json` + `tilemapresource.xml` (or the ion
+   endpoints) and seeds tile availability from `layer.json`'s `available`
+   array plus the root tiles' metadata. If imagery fails to connect,
+   streaming continues terrain-only with a warning.
+3. **Data Center** (or type a lat/lon and press **Go To**) — anchors the
    Blender origin there, frames the view, and raises the viewport clip range.
-3. **Start Streaming** — fly around; LOD follows the viewport camera.
+4. **Start Streaming** — fly around; LOD follows the viewport camera.
    The Status box shows visible/built/fetching counts and the deepest level.
-4. **Stop** keeps the loaded tiles; **Clear Tiles** removes everything.
+5. **Stop** keeps the loaded tiles; **Clear Tiles** removes everything.
 
 Diagnostic: **Load Single Tile** synchronously builds one tile (bypasses the
 streamer) — useful to sanity-check a server.
@@ -93,6 +128,10 @@ imagery (z,x,y)):
 - Absent tiles answered with 500/502 (instead of 404) are retried briefly,
   then marked dead; only *connection*-level failures trip the
   server-unreachable circuit breaker.
+- The disk cache is namespaced per source (`ion-<assetid>` or a slug of the
+  server URL) so tile coordinates from different datasets never collide.
+- Gzip-encoded terrain tiles (ion's CDN) are detected by magic bytes and
+  decompressed transparently.
 
 ## Development
 
@@ -111,3 +150,5 @@ LOD traversal are all unit-tested outside Blender.
   already decoded).
 - Oct-encoded vertex normals → custom split normals (decoded, not yet applied).
 - 3D Tiles (b3dm/glTF) streaming behind the same provider/LOD contract.
+- Web-mercator imagery draping (would unlock most ion-hosted imagery; needs
+  per-vertex V reprojection and a mercator-aware ancestor pick).

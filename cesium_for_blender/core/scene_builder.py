@@ -8,6 +8,8 @@ orphaned and memory stays bounded during long streaming sessions.
 
 from __future__ import annotations
 
+import os
+
 import bpy
 import numpy as np
 
@@ -20,8 +22,15 @@ def tile_object_name(key) -> str:
     return "T_%d_%d_%d" % tuple(key)
 
 
-def material_name(img_key) -> str:
-    return MAT_PREFIX + "%d_%d_%d" % tuple(img_key)
+def material_name(img_key, tag: str = "") -> str:
+    """tag ('M' for mercator) keeps schemes with overlapping (z,x,y) numbers
+    from sharing a material name. Mercator cover keys are 4-tuples
+    (m, x, ty0, ty1)."""
+    return (
+        MAT_PREFIX
+        + (tag + "_" if tag else "")
+        + "_".join(str(int(p)) for p in img_key)
+    )
 
 
 def ensure_collection() -> bpy.types.Collection:
@@ -34,11 +43,94 @@ def ensure_collection() -> bpy.types.Collection:
     return coll
 
 
-def get_or_create_material(img_key, img_path: str) -> bpy.types.Material:
-    name = material_name(img_key)
+def _stitched_image(
+    name: str, paths: list[str], cols: int, save_path: str | None = None
+) -> bpy.types.Image | None:
+    """Stitch a row-major grid of tile files (south row first, west first
+    within a row — matching Blender's bottom-up pixel layout) into one
+    image. Source datablocks are freed immediately; pixel values are copied
+    raw (both sides sRGB-encoded), so no color shift. The result is saved
+    to save_path (disk cache) so rebuilds — and later sessions — load a
+    file instead of repeating main-thread pixel work, and the image is
+    file-backed (a purely generated datablock can drop its buffer on
+    undo/reload and render magenta)."""
+    img = bpy.data.images.get(name)
+    if img is not None:
+        return img
+    parts = []
+    for p in paths:
+        try:
+            src = bpy.data.images.load(p, check_existing=True)
+        except RuntimeError:
+            return None
+        w, h = src.size
+        if w == 0 or h == 0:
+            return None
+        buf = np.empty(w * h * 4, dtype=np.float32)
+        src.pixels.foreach_get(buf)
+        if src.users == 0:
+            bpy.data.images.remove(src)
+        parts.append(buf.reshape(h, w, 4))
+    if any(p.shape != parts[0].shape for p in parts):
+        return None
+    rows = [
+        np.concatenate(parts[r * cols:(r + 1) * cols], axis=1)
+        for r in range(len(parts) // cols)
+    ]
+    full = rows[0] if len(rows) == 1 else np.concatenate(rows, axis=0)
+    img = bpy.data.images.new(
+        name, width=full.shape[1], height=full.shape[0], alpha=True
+    )
+    img.colorspace_settings.name = "sRGB"
+    img.pixels.foreach_set(np.ascontiguousarray(full).ravel())
+    if save_path:
+        try:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            img.filepath_raw = save_path
+            img.file_format = "PNG"
+            img.save()
+            img.source = "FILE"
+        except (OSError, RuntimeError):
+            pass    # in-memory image still works for this session
+    return img
+
+
+def get_or_create_material(
+    img_key, img_paths, tag: str = "", save_path: str | None = None
+) -> bpy.types.Material:
+    """img_paths: row-major grid of tile files (south row first); a single
+    entry is used directly, multiples are stitched (and persisted to
+    save_path). Mercator cover keys (m, tx0, ty0, tx1, ty1) carry the grid
+    width. Any image failure degrades to the gray material — a texture node
+    without an image renders magenta, which reads as a bug."""
+    if isinstance(img_paths, str):
+        img_paths = [img_paths]
+    name = material_name(img_key, tag)
     mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
+
+    img = None
+    try:
+        if len(img_paths) > 1:
+            cols = (
+                int(img_key[3]) - int(img_key[1]) + 1 if len(img_key) == 5 else 1
+            )
+            img = _stitched_image(
+                "CesiumStitch_" + name[len(MAT_PREFIX):], img_paths, cols,
+                save_path,
+            )
+        if img is None:
+            img = bpy.data.images.load(img_paths[0], check_existing=True)
+            img.colorspace_settings.name = "sRGB"
+        if img.size[0] == 0:
+            img = None
+    except RuntimeError:
+        img = None
+    if img is None:
+        print(f"[cesium] imagery unusable for {img_key}: {img_paths[:1]}")
+        return get_or_create_gray_material()
+
     mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     nt = mat.node_tree
@@ -52,8 +144,6 @@ def get_or_create_material(img_key, img_path: str) -> bpy.types.Material:
     tex.location = (-400, 300)
     tex.extension = "EXTEND"
     tex.interpolation = "Linear"
-    img = bpy.data.images.load(img_path, check_existing=True)
-    img.colorspace_settings.name = "sRGB"
     tex.image = img
     if bsdf is not None:
         nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
@@ -101,6 +191,10 @@ def build_tile_object(key, md, material: bpy.types.Material) -> bpy.types.Object
 
     obj = bpy.data.objects.new(name, mesh)
     obj["cesium_key"] = list(key)
+    if md.imagery_key is not None:
+        # remembered so style toggles can restore the exact texture whose
+        # projection is baked into this mesh's UVs (scheme-agnostic)
+        obj["cesium_img"] = list(md.imagery_key)
     coll.objects.link(obj)
     return obj
 
@@ -167,6 +261,25 @@ def tag_redraw_view3d():
         for area in screen.areas:
             if area.type == "VIEW_3D":
                 area.tag_redraw()
+
+
+def tag_redraw_sidebar():
+    """Redraw only the N-panel region — the panel does not refresh on its
+    own, so without this the Status counters freeze and streaming looks
+    stalled even when it is working."""
+    wm = bpy.context.window_manager
+    if wm is None:
+        return
+    for window in wm.windows:
+        screen = window.screen
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            for region in area.regions:
+                if region.type == "UI":
+                    region.tag_redraw()
 
 
 def datablock_counts() -> dict:
