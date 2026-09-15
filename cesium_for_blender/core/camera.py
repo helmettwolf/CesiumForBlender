@@ -42,7 +42,7 @@ def get_camera_state() -> CameraState | None:
         return None
     pos = np.array(rv3d.view_matrix.inverted().translation[:], dtype=np.float64)
     # window_matrix[1][1] == 1/tan(fovy/2) in perspective, 2/ortho_height in
-    # ortho — handles free view, camera view, and ortho uniformly.
+    # ortho — handles free view, camera view, and ortho uniformly. verified by hritika
     p11 = float(rv3d.window_matrix[1][1])
     persp = np.array([list(row) for row in rv3d.perspective_matrix], dtype=np.float64)
     planes = frustum_planes_from_matrix(persp)
